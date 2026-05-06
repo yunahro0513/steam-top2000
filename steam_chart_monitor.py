@@ -205,8 +205,25 @@ def fetch_reviews(appid: int) -> dict:
 
 # ── 출시 예정 게임 수집 ────────────────────────────────────────────────────────
 
-def _enrich_upcoming_item(appid: int, name_fallback: str) -> dict | None:
-    """단일 신작 게임의 상세정보 수집 (release_date, genres, price, dev/pub)"""
+def _enrich_upcoming_item(appid: int, name_fallback: str) -> dict:
+    """단일 신작 게임의 상세정보 수집 (release_date, genres, price, dev/pub)
+
+    API 호출 실패 시에도 appid/name 기본 정보는 반드시 반환.
+    HTML 스크래핑(fetch_dev_pub_from_store)은 사용하지 않음.
+    """
+    # 기본값: API가 실패해도 이것만큼은 저장
+    base = {
+        "appid":        appid,
+        "name":         name_fallback,
+        "developer":    None,
+        "publisher":    None,
+        "genres":       None,
+        "release_date": "",
+        "coming_soon":  True,
+        "price_krw":    None,
+        "discount_pct": 0,
+        "header_image": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
+    }
     detail_url = (
         f"https://store.steampowered.com/api/appdetails/"
         f"?appids={appid}&cc=kr&filters=release_date,genres,price_overview"
@@ -215,32 +232,27 @@ def _enrich_upcoming_item(appid: int, name_fallback: str) -> dict | None:
         dr  = requests.get(detail_url, headers=HEADERS, timeout=12)
         app = dr.json().get(str(appid), {})
         if not (app.get("success") and app.get("data")):
-            return None
+            print(f"    ⚠ AppID {appid} API success=false, 기본값 사용")
+            return base
         d  = app["data"]
         p  = d.get("price_overview", {})
         genres = ", ".join(g["description"] for g in d.get("genres", []))
         rd     = d.get("release_date", {})
         release_date_str = rd.get("date", "") if rd else ""
-        coming_soon_flag = rd.get("coming_soon", True) if rd else True
+        coming_soon_flag = bool(rd.get("coming_soon", True)) if rd else True
 
-        # 개발사/배급사는 store 페이지 스크래핑으로 보완
-        developer, publisher = fetch_dev_pub_from_store(appid)
-
-        return {
-            "appid":        appid,
-            "name":         name_fallback,
-            "developer":    developer,
-            "publisher":    publisher,
+        base.update({
+            "name":         d.get("name") or name_fallback,
             "genres":       genres or None,
             "release_date": release_date_str,
             "coming_soon":  coming_soon_flag,
-            "price_krw":    p.get("final", 0) // 100 if p else None,
-            "discount_pct": p.get("discount_percent", 0) if p else 0,
-            "header_image": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
-        }
+            "price_krw":    int(p.get("final", 0)) // 100 if p else None,
+            "discount_pct": int(p.get("discount_percent", 0)) if p else 0,
+        })
+        return base
     except Exception as e:
-        print(f"    ⚠ AppID {appid} 조회 실패: {e}")
-        return None
+        print(f"    ⚠ AppID {appid} 조회 실패: {e}, 기본값 사용")
+        return base  # None 반환 대신 기본값 반환
 
 
 def fetch_upcoming_games() -> list:
@@ -274,9 +286,9 @@ def fetch_upcoming_games() -> list:
     games = []
     for it in items:
         g = _enrich_upcoming_item(it["id"], it["name"])
-        if g:
-            games.append(g)
+        games.append(g)
         time.sleep(0.5)
+    print(f"  상세 수집 완료: {len(games)}개 (API 실패분은 기본값 포함)")
 
     # 날짜 오름차순 정렬 (출시 예정 먼저, 그 다음 최근 출시)
     games.sort(key=lambda x: (not x["coming_soon"], x.get("release_date") or ""))
@@ -631,8 +643,8 @@ def write_json(today_df, lr1, lr2, lr1m, upcoming):
     }
     os.makedirs(os.path.dirname(JSON_PATH), exist_ok=True)
     with open(JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"✔ JSON 저장: {JSON_PATH}")
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    print(f"✔ JSON 저장: {JSON_PATH} (upcoming: {len(upcoming)}개)")
 
 
 # ── 기존 데이터 로드 ──────────────────────────────────────────────────────────
@@ -642,7 +654,21 @@ def load_existing() -> pd.DataFrame:
         return pd.DataFrame()
     try:
         df = pd.read_excel(EXCEL_PATH, sheet_name="일별 스냅샷")
+        # 일별 스냅샷 헤더는 한글(날짜, 동접자...)로 저장되어 있음.
+        # 영문 컬럼명으로 역매핑해야 add_ccu_change / analyze_longrun이 작동함.
+        KR_TO_EN = {
+            "날짜": "date", "순위": "rank", "AppID": "appid",
+            "게임명": "name", "개발사": "developer", "퍼블리셔": "publisher",
+            "장르": "genres", "출시일": "release_date",
+            "판매량(추정)": "owners_estimate",
+            "동접자": "ccu", "전일증감": "ccu_change", "증감(%)": "ccu_change_pct",
+            "긍정리뷰(%)": "review_score_pct", "리뷰수": "total_reviews",
+            "가격(₩)": "price_krw", "할인(%)": "discount_pct",
+            "정가(₩)": "original_price_krw",
+        }
+        df = df.rename(columns=KR_TO_EN)
         df["date"] = pd.to_datetime(df["date"]).dt.date.astype(str)
+        print(f"  ✓ 기존 데이터 로드: {len(df)}행 ({df['date'].nunique()}일치)")
         return df
     except Exception as e:
         print(f"기존 파일 로드 실패 ({e}), 새로 시작합니다.")
