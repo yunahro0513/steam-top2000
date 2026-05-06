@@ -661,27 +661,41 @@ function filterIndieCandidates() {
           <th style="padding:10px 12px;text-align:left;color:var(--muted);font-size:11px;font-weight:600">개발사</th>
           <th style="padding:10px 12px;text-align:left;color:var(--muted);font-size:11px;font-weight:600">퍼블리셔</th>
           <th style="padding:10px 12px;text-align:right;color:var(--muted);font-size:11px;font-weight:600">동접</th>
+          <th style="padding:10px 12px;text-align:right;color:var(--muted);font-size:11px;font-weight:600">전일증감</th>
           <th style="padding:10px 12px;text-align:right;color:var(--muted);font-size:11px;font-weight:600">판매량(추정)</th>
           <th style="padding:10px 12px;text-align:left;color:var(--muted);font-size:11px;font-weight:600">리뷰</th>
           <th style="padding:10px 12px;text-align:left;color:var(--muted);font-size:11px;font-weight:600">출시일</th>
         </tr></thead>
         <tbody>
-          ${candidates.map(g=>`
-            <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+          ${candidates.map(g=>{
+            const isNew    = g.ccu_change==null;
+            const isRising = (g.ccu_change_pct||0) >= 20;
+            const badge    = isNew
+              ? `<span style="background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple);border-radius:3px;font-size:10px;padding:1px 5px;margin-left:5px">NEW</span>`
+              : isRising
+              ? `<span style="background:var(--green-bg);color:var(--up);border:1px solid var(--up);border-radius:3px;font-size:10px;padding:1px 5px;margin-left:5px">↑${g.ccu_change_pct}%</span>`
+              : '';
+            const ccuChgStr = g.ccu_change==null ? '<span style="color:var(--muted)">신규</span>'
+              : g.ccu_change>0 ? `<span style="color:var(--up)">+${fmt(g.ccu_change)}</span>`
+              : g.ccu_change<0 ? `<span style="color:var(--down)">${fmt(g.ccu_change)}</span>`
+              : '±0';
+            return `<tr style="border-bottom:1px solid rgba(255,255,255,.04)">
               <td style="padding:9px 12px;color:var(--muted);font-weight:700">${g.rank}</td>
               <td style="padding:9px 12px;font-weight:500">
                 <a href="https://store.steampowered.com/app/${g.appid}" target="_blank"
                    style="color:#fff;text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='#fff'">
                   ${g.name}
-                </a>
+                </a>${badge}
               </td>
               <td style="padding:9px 12px;color:var(--muted);font-size:12px">${g.developer||'-'}</td>
               <td style="padding:9px 12px;color:var(--muted);font-size:12px">${g.publisher||'-'}</td>
               <td style="padding:9px 12px;text-align:right;font-variant-numeric:tabular-nums">${fmt(g.ccu)}</td>
+              <td style="padding:9px 12px;text-align:right;font-variant-numeric:tabular-nums">${ccuChgStr}</td>
               <td style="padding:9px 12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)">${fmtM(g.owners_estimate)}</td>
               <td style="padding:9px 12px">${reviewFmt(g.total_reviews, g.review_score_pct)}</td>
               <td style="padding:9px 12px;color:var(--muted);font-size:12px;white-space:nowrap">${g.release_date||'-'}</td>
-            </tr>`).join('')}
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
     </div>
@@ -809,11 +823,11 @@ fetch('data.json?_='+Date.now())
     const rows = data.today_chart||[];
     const top  = rows[0];
 
-    // 최다 상승 게임 (ccu_change 기준)
+    // 최다 상승 게임 (ccu_change 기준, 전체)
     const risingGames = rows.filter(g=>(g.ccu_change||0)>0);
     const topRiser = [...risingGames].sort((a,b)=>(b.ccu_change||0)-(a.ccu_change||0))[0];
 
-    // 신규 진입 (ccu_change가 null → 전일 기록 없음 = 신규)
+    // 신규 진입 (ccu_change가 null → 전일 기록 없음 = 신규, 전체)
     const newEntries = rows.filter(g=>g.ccu_change==null).length;
 
     // 중소 개발사 필터 (대형사 블랙리스트)
@@ -826,13 +840,14 @@ fetch('data.json?_='+Date.now())
       const pub = (g.publisher||g.developer||'').toLowerCase();
       return BIG_PUB.some(b => pub.includes(b));
     };
-    const indyCandidates = rows
-      .filter(g => !isBig(g))
-      .sort((a,b) => (b.ccu||0)-(a.ccu||0));
-    // 인디 최고 순위: rank 가장 낮은 번호(=가장 높은 순위)
-    const topIndyRank = [...indyCandidates].sort((a,b)=>(a.rank||999)-(b.rank||999))[0];
-    // 중소 개발사 Top 동접
-    const topIndyCCU = indyCandidates[0];
+    const indyCandidates = rows.filter(g => !isBig(g));
+
+    // A. 급상승 인디: 중소 개발사 중 CCU 증가율 1위
+    const indyRising = indyCandidates.filter(g=>(g.ccu_change||0)>0);
+    const topIndyRiser = [...indyRising].sort((a,b)=>(b.ccu_change_pct||0)-(a.ccu_change_pct||0))[0];
+
+    // B. 신규 진입 인디: 중소 개발사 중 오늘 처음 등장
+    const indyNew = indyCandidates.filter(g=>g.ccu_change==null);
 
     document.getElementById('stats-today').innerHTML = `
       <div class="stat-card">
@@ -840,29 +855,28 @@ fetch('data.json?_='+Date.now())
         <div class="stat-value" style="font-size:14px">${top?.name||'-'}</div>
         <div class="stat-sub">동접 ${fmt(top?.ccu)}</div>
       </div>
-      <div class="stat-card" style="border-color:var(--gold)">
-        <div class="stat-label" style="color:var(--gold)">🏆 인디 최고 순위</div>
-        <div class="stat-value" style="font-size:14px;color:var(--gold)">${topIndyRank ? topIndyRank.rank+'위 · '+topIndyRank.name : '-'}</div>
-        <div class="stat-sub">중소 개발사 중 최고 순위</div>
-      </div>
       <div class="stat-card">
         <div class="stat-label">📈 최다 상승 게임</div>
         <div class="stat-value" style="font-size:13px;color:var(--up)">${topRiser?.name||'-'}</div>
         <div class="stat-sub">+${fmt(topRiser?.ccu_change||0)} (${topRiser?.ccu_change_pct||0}%)</div>
       </div>
       <div class="stat-card" style="border-color:var(--purple);cursor:pointer" onclick="filterIndieCandidates()" title="클릭하면 전체 목록 보기">
-        <div class="stat-label" style="color:var(--purple)">🎯 중소 개발사 Top 동접</div>
-        <div class="stat-value" style="color:var(--purple)">${fmt(topIndyCCU?.ccu)}</div>
-        <div class="stat-sub">${topIndyCCU?.name||'-'} · 클릭해서 전체 보기</div>
+        <div class="stat-label" style="color:var(--purple)">🎯 주목 중소 개발사</div>
+        <div class="stat-value" style="color:var(--purple);font-size:13px">
+          ${topIndyRiser ? '↑ '+topIndyRiser.name+' (+'+topIndyRiser.ccu_change_pct+'%)' : '급상승 없음'}
+        </div>
+        <div class="stat-sub">
+          신규 진입 ${indyNew.length}개 · 클릭해서 전체 보기
+        </div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">🆕 신규 진입</div>
+        <div class="stat-label">🆕 신규 진입 (전체)</div>
         <div class="stat-value">${newEntries}</div>
         <div class="stat-sub">오늘 처음 관측된 게임</div>
       </div>
     `;
-    // 중소 개발사 후보 목록 캐시
-    window._indyCandidates = indyCandidates;
+    // 중소 개발사 후보 목록 캐시 (모달용, CCU 내림차순)
+    window._indyCandidates = [...indyCandidates].sort((a,b)=>(b.ccu||0)-(a.ccu||0));
 
     // 장르 옵션
     buildGenreOptions('today', rows);
