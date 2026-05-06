@@ -20,7 +20,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-from datetime import date
+from datetime import date, timedelta
 import time
 import os
 import json
@@ -205,6 +205,40 @@ def fetch_reviews(appid: int) -> dict:
 
 # ── 출시 예정 게임 수집 ────────────────────────────────────────────────────────
 
+def _parse_date(date_str: str):
+    """날짜 문자열을 date 객체로 파싱.
+    지원 형식: '10 May, 2026' / 'May 10, 2026' / '10 May 2026' / '2026-05-10'
+    파싱 실패 시 None 반환.
+    """
+    from datetime import datetime as _dt
+    if not date_str:
+        return None
+    for fmt in ("%d %b, %Y", "%b %d, %Y", "%d %B, %Y", "%B %d, %Y",
+                "%d %b %Y", "%B %d %Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return _dt.strptime(date_str.strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def fetch_gamalytic_followers(appid: int) -> int:
+    """Gamalytic API로 Steam 팔로워 수 조회 (무료, 인증 불필요).
+    정상 조회 시 팔로워 수(>=0), 조회 실패 시 -1 반환.
+    -1 반환된 게임은 팔로워 필터에서 제외하지 않음.
+    """
+    try:
+        url = f"https://gamalytic.com/api/game-details/{appid}"
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            val = r.json().get("followers")
+            if val is not None:
+                return int(val)
+    except Exception:
+        pass
+    return -1
+
+
 def _enrich_upcoming_item(appid: int, name_fallback: str, header_image_fallback: str = "") -> dict:
     """단일 신작 게임의 상세정보 수집.
 
@@ -224,6 +258,7 @@ def _enrich_upcoming_item(appid: int, name_fallback: str, header_image_fallback:
         "price_krw":    None,
         "discount_pct": 0,
         "header_image": header_image_fallback or cdn_img,
+        "followers":    -1,
     }
     # 필터 없이 요청 → developers, publishers, genres, release_date, price_overview 모두 포함
     detail_url = (
@@ -279,11 +314,17 @@ def _enrich_upcoming_item(appid: int, name_fallback: str, header_image_fallback:
 def fetch_upcoming_games() -> list:
     """
     Steam 주간 신작 캘린더 수집.
-    - coming_soon: Steam 큐레이션 출시 예정 게임
-    - new_releases: Steam 이번 주 신규 출시
-    두 섹션을 합산 후 날짜별로 정렬하여 반환.
+    - Steam featuredcategories API: coming_soon + new_releases 섹션
+    - 각 게임의 appdetails 수집 (개발사/퍼블리셔/장르/가격)
+    - Gamalytic API로 팔로워 수 조회 → 500 미만 게임 제외
+    - 팔로워 조회 실패(-1) 게임은 포함 (불명 처리)
+    - 10,000+ 팔로워 게임은 HTML 대시보드에서 강조 표시
     """
     print("▶ 신작 캘린더 수집 중...")
+    today     = date.today()
+    date_from = today - timedelta(days=7)   # 최근 1주 출시 포함
+    date_to   = today + timedelta(days=21)  # 3주 후까지 예정작 포함
+
     cat_url = "https://store.steampowered.com/api/featuredcategories/?cc=kr&l=koreana"
     seen    = set()
     items   = []
@@ -307,17 +348,36 @@ def fetch_upcoming_games() -> list:
         print(f"  ⚠ featuredcategories 수집 실패: {e}")
         return []
 
-    print(f"  총 {len(items)}개 → 상세 수집 중...")
+    print(f"  총 {len(items)}개 → 상세 + 팔로워 수집 중...")
     games = []
     for it in items:
+        # 1. appdetails 수집 (개발사/퍼블리셔/장르/가격/출시일)
         g = _enrich_upcoming_item(it["id"], it["name"], it.get("header_image", ""))
+
+        # 2. 날짜 범위 필터: 파싱 성공 시에만 적용 (파싱 실패는 포함)
+        parsed = _parse_date(g.get("release_date", ""))
+        if parsed is not None and not (date_from <= parsed <= date_to):
+            print(f"    날짜 범위 외 제외: {g['name']} ({g['release_date']})")
+            time.sleep(0.2)
+            continue
+
+        # 3. Gamalytic 팔로워 조회
+        followers = fetch_gamalytic_followers(it["id"])
+        g["followers"] = followers
+        print(f"    {g['name']} | 팔로워={followers if followers >= 0 else '조회불가'}")
+
+        # 4. 팔로워 500 미만 제외 (-1=조회실패는 포함)
+        if 0 <= followers < 500:
+            print(f"    팔로워 부족 제외 ({followers}명)")
+            time.sleep(0.2)
+            continue
+
         games.append(g)
         time.sleep(0.5)
-    print(f"  상세 수집 완료: {len(games)}개 (API 실패분은 기본값 포함)")
 
-    # 날짜 오름차순 정렬 (출시 예정 먼저, 그 다음 최근 출시)
+    # 날짜 오름차순 정렬 (출시 예정 먼저, 이후 최근 출시)
     games.sort(key=lambda x: (not x["coming_soon"], x.get("release_date") or ""))
-    print(f"  ✓ {len(games)}개 수집 완료")
+    print(f"  ✓ 최종 {len(games)}개 수집 완료 (팔로워 500+ 또는 조회 불명)")
     return games
 
 
@@ -613,16 +673,18 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
     ws6["A1"] = f"Steam 주목 출시 예정 게임 — {date.today().isoformat()}"
     ws6["A1"].font = Font(bold=True, size=13, color="6A1B9A")
     ws6.append([])
-    UPC_COLS = ["게임명", "개발사", "퍼블리셔", "장르", "출시예정일", "상태", "가격(₩)", "AppID"]
+    UPC_COLS = ["게임명", "개발사", "퍼블리셔", "장르", "팔로워", "출시예정일", "상태", "가격(₩)", "AppID"]
     ws6.append(UPC_COLS)
     _style_header(ws6, 3, len(UPC_COLS))
     if upcoming:
         for ri, g in enumerate(upcoming, 4):
+            fw = g.get("followers", -1)
             vals = [
                 g.get("name"),
                 g.get("developer"),
                 g.get("publisher"),
                 g.get("genres"),
+                fw if fw >= 0 else None,
                 g.get("release_date"),
                 "출시 예정" if g.get("coming_soon") else "출시됨",
                 g.get("price_krw"),
@@ -635,7 +697,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
     else:
         ws6["A4"] = "출시 예정 게임 데이터를 가져오지 못했습니다."
         ws6["A4"].font = Font(italic=True, color="888888")
-    _set_col_widths(ws6, [34, 24, 24, 22, 15, 10, 10, 10])
+    _set_col_widths(ws6, [34, 24, 24, 22, 10, 15, 10, 10, 10])
     ws6.freeze_panes = "A4"
 
     wb.save(EXCEL_PATH)
