@@ -300,8 +300,8 @@ def _enrich_upcoming_item(appid: int, name_fallback: str, header_image_fallback:
         try:
             dr   = requests.get(detail_url, headers=HEADERS,
                                 cookies=STEAM_COOKIES, timeout=15)
-            raw  = dr.json().get(str(appid))
-            resp = raw or {}   # null 응답 → {} 로 처리 (NoneType 방지)
+            raw  = (dr.json() or {}).get(str(appid))  # json() 자체 null 방어
+            resp = raw or {}   # 키 값이 null인 경우 방어
             if resp.get("success") and resp.get("data"):
                 app_data = resp["data"]
                 break
@@ -560,6 +560,18 @@ def analyze_longrun(df: pd.DataFrame, min_days: int) -> pd.DataFrame:
 
 # ── Excel 출력 ────────────────────────────────────────────────────────────────
 
+def _xval(v):
+    """pandas pd.NA / np.nan → None 변환 (openpyxl 호환)
+    Int64 nullable integer 컬럼의 <NA> 값이 그대로 셀에 들어가면 ValueError 발생.
+    """
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
+
+
 HDR_FILL  = PatternFill("solid", start_color="1F4E79")
 HDR_FONT  = Font(bold=True, color="FFFFFF", size=10)
 ALT_FILL  = PatternFill("solid", start_color="EBF3FB")
@@ -615,7 +627,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
     keys = list(SNAP_COLS.keys())
     for ri, row in enumerate(all_df.itertuples(index=False), 2):
         for ci, k in enumerate(keys, 1):
-            ws1.cell(ri, ci, value=getattr(row, k, None))
+            ws1.cell(ri, ci, value=_xval(getattr(row, k, None)))
         if ri % 2 == 0:
             for ci in range(1, len(keys) + 1):
                 ws1.cell(ri, ci).fill = ALT_FILL
@@ -646,11 +658,11 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
                     val = ""
                 ws2.cell(ri, ci, value=val)
             elif k == "_review_display":
-                pct = getattr(row, "review_score_pct", 0) or 0
-                cnt = getattr(row, "total_reviews", 0) or 0
+                pct = _xval(getattr(row, "review_score_pct", 0)) or 0
+                cnt = _xval(getattr(row, "total_reviews", 0)) or 0
                 ws2.cell(ri, ci, value=f"{cnt:,} ({pct}%)" if cnt else "")
             else:
-                ws2.cell(ri, ci, value=getattr(row, k, None))
+                ws2.cell(ri, ci, value=_xval(getattr(row, k, None)))
         disc = getattr(row, "discount_pct", 0) or 0
         chg  = getattr(row, "ccu_change", None)
         if disc > 0:
@@ -699,7 +711,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         if not df.empty:
             for ri, row in enumerate(df.itertuples(index=False), 4):
                 for ci, k in enumerate(LR_COLS.keys(), 1):
-                    ws.cell(ri, ci, value=getattr(row, k, None))
+                    ws.cell(ri, ci, value=_xval(getattr(row, k, None)))
                 for ci in range(1, len(LR_COLS) + 1):
                     ws.cell(ri, ci).fill = fill
         else:
