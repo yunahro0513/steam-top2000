@@ -307,8 +307,8 @@
     <div class="pagination" id="pg-today"></div>
     <div class="fn-note">
       <strong>① 판매량(추정)</strong> SteamSpy가 제공하는 owners 범위(예: 200,000 ~ 500,000)의 중간값으로 환산한 추정치. 실제 판매량·게임 수 증정·번들 포함 여부에 따라 실제와 차이 있음 &nbsp;·&nbsp;
-      <strong>② 동접자</strong> Steam 공식 동시접속자 수가 아닌 SteamSpy API 추정치. 수집 주기·알고리즘 차이로 실제보다 높거나 낮을 수 있음 &nbsp;·&nbsp;
-      <strong>③ 전일증감</strong> 전날 동일 스크립트 실행 시점 스냅샷 기준. 수집 시간 차이(예: 한국시간 09:00 실행)에 따라 오차 있을 수 있음
+      <strong>② 동접자</strong> Steam 공식 ISteamUserStats API 실시간 수치 (조회 실패 시 SteamSpy 추정치 폴백). 수집 시점(한국시간 09:00)의 스냅샷임 &nbsp;·&nbsp;
+      <strong>③ 전일증감</strong> 전날 동일 스크립트 실행 시점 스냅샷 기준. SteamSpy 동접 추정치는 수주간 평균으로 단기 변동이 크지 않아 연속 수집 시 0으로 표시될 수 있음
     </div>
   </div>
 
@@ -384,7 +384,7 @@
     <div class="pagination" id="pg-indy"></div>
     <div class="fn-note">
       <strong>① 판매량(추정)</strong> SteamSpy owners 범위 중간값. 실제 판매량과 다를 수 있음 &nbsp;·&nbsp;
-      <strong>② 동접자</strong> SteamSpy API 추정치 (Steam 공식 수치 아님) &nbsp;·&nbsp;
+      <strong>② 동접자</strong> Steam 공식 실시간 수치 (조회 실패 시 SteamSpy 폴백) &nbsp;·&nbsp;
       <strong>③ 전일증감</strong> 전날 동일 수집 시점 기준 &nbsp;·&nbsp;
       <strong>퍼블리싱 후보 기준</strong> 대형사 키워드 단순 매칭 방식 — 실제 기업 규모와 다를 수 있으며, 퍼블리셔 미기재 게임은 개발사 명칭 적용
     </div>
@@ -572,11 +572,20 @@ function reviewFmt(cnt, pct) {
   const cls = scoreClass(pct||0);
   return `<span class="review-cell">${fmt(cnt)} <span class="${cls}">(${pct||0}%)</span></span>`;
 }
+function rankFmt(rank, rankChg) {
+  if (rankChg == null || rankChg === 0) return rank + '위';
+  const sign = rankChg > 0 ? '▲' : '▼';
+  const cls  = rankChg > 0 ? 'ccu-up' : 'ccu-down';
+  const abs  = Math.abs(rankChg);
+  return `${rank}위 <span class="${cls}" style="font-size:10px;font-weight:700">(${sign}${abs})</span>`;
+}
+
 function ccuChangeFmt(chg, pct) {
   if (chg==null) return '<span style="color:var(--muted)">-</span>';
+  if (chg===0)   return '<span style="color:var(--muted);font-size:12px">–</span>';
   const sign  = chg>0 ? '+' : '';
-  const cls   = chg>0 ? 'ccu-up' : chg<0 ? 'ccu-down' : '';
-  const arrow = chg>0 ? '▲' : chg<0 ? '▼' : '–';
+  const cls   = chg>0 ? 'ccu-up' : 'ccu-down';
+  const arrow = chg>0 ? '▲' : '▼';
   const pctStr = pct!=null ? ` (${sign}${pct}%)` : '';
   return `<span class="ccu-change ${cls}">${arrow} ${sign}${Number(chg).toLocaleString()}${pctStr}</span>`;
 }
@@ -667,9 +676,10 @@ function renderChartRow(g, key) {
   const chg  = g.ccu_change;
   let rowCls = '';
   if (key === 'today') {
-    // 오늘의 차트: 동접 상위 상승 30개 금색 하이라이트, 하락만 붉은 배경
+    // 오늘의 차트: 동접 상위/상승 Top 30 금색 하이라이트, 하락만 붉은 배경
+    // (ccu_change 가 모두 0이면 동접 기준 상위 30개로 대체됨)
     if (window._topRisersSet?.has(g.appid)) rowCls = 'row-hot';
-    else if (chg < 0) rowCls = 'row-down';
+    else if (chg != null && chg < 0) rowCls = 'row-down';
   } else if (key === 'indy') {
     // 퍼블리싱 후보 탭: 의미 있는 후보 보라 하이라이트
     if (window._highlightIndySet?.has(g.appid)) rowCls = 'row-publish';
@@ -683,7 +693,7 @@ function renderChartRow(g, key) {
     ? `<span style="margin-left:5px;font-size:10px;background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple);border-radius:3px;padding:1px 5px;vertical-align:middle">${g.ccu_change==null?'NEW':(g.ccu_change_pct||0)>=15?`↑${g.ccu_change_pct}%`:'TOP'}</span>`
     : '';
   return `<tr class="${rowCls}">
-    <td class="${rankCls}">${g.rank}</td>
+    <td class="${rankCls}" style="white-space:nowrap">${rankFmt(g.rank, g.rank_change)}</td>
     <td class="game-name"><a href="https://store.steampowered.com/app/${g.appid}" target="_blank">${g.name}</a>${hlBadge}</td>
     <td class="muted-cell">${g.developer||'-'}</td>
     <td class="muted-cell">${g.publisher||'-'}</td>
@@ -1060,15 +1070,24 @@ fetch('data.json?_='+Date.now())
     const risingGames  = rows.filter(g => (g.ccu_change||0) > 0);
     const fallingGames = rows.filter(g => (g.ccu_change||0) < 0);
     const newEntries   = rows.filter(g => g.ccu_change == null).length;
+    const stableGames  = rows.filter(g => g.ccu_change === 0).length;
     const hotGenre     = computeTopGenre(rows.slice(0,100), 0);
     const totalCcuChg  = rows.reduce((s,g) => s+(g.ccu_change||0), 0);
     const chuSign      = totalCcuChg >= 0 ? '+' : '';
     const topRiser     = [...risingGames].sort((a,b)=>(b.ccu_change||0)-(a.ccu_change||0))[0];
 
+    // ccu_change 가 모두 0인 경우 대비 (SteamSpy 추정치 특성상 단기 변동 없음)
+    const anyRising    = risingGames.length > 0;
+    const rank2Game    = rows[1];  // 1위는 별도 카드로 표시되므로 2위 게임 사용
+    const top10AvgCcu  = rows.length > 0
+      ? Math.round(rows.slice(0, 10).reduce((s,g) => s+(g.ccu||0), 0) / Math.min(10, rows.length))
+      : 0;
+
     // 오늘의 차트 — 동접 상승량 기준 Top 30 (금색 음영)
-    const top30Risers = [...risingGames]
-      .sort((a,b) => (b.ccu_change||0) - (a.ccu_change||0))
-      .slice(0, 30);
+    // 상승 게임이 없으면 동접 기준 Top 30 (= 랭킹 순)으로 대체
+    const top30Risers = anyRising
+      ? [...risingGames].sort((a,b) => (b.ccu_change||0) - (a.ccu_change||0)).slice(0, 30)
+      : rows.slice(0, 30);
     window._topRisersSet = new Set(top30Risers.map(g => g.appid));
 
     document.getElementById('stats-today').innerHTML = `
@@ -1078,18 +1097,33 @@ fetch('data.json?_='+Date.now())
         <div class="stat-sub">동접 ${fmt(top?.ccu)}</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">📈 최다 상승 게임</div>
-        <div class="stat-value" style="font-size:13px;color:var(--up);line-height:1.3">${topRiser?.name||'-'}</div>
-        <div class="stat-sub">+${fmt(topRiser?.ccu_change||0)} (+${topRiser?.ccu_change_pct||0}%)</div>
+        <div class="stat-label">📈 ${anyRising ? '최다 상승 게임' : '동접 2위 게임'}</div>
+        <div class="stat-value" style="font-size:13px;color:${anyRising?'var(--up)':'#fff'};line-height:1.3">
+          ${anyRising ? (topRiser?.name||'-') : (rank2Game?.name||'-')}
+        </div>
+        <div class="stat-sub">
+          ${anyRising
+            ? `+${fmt(topRiser?.ccu_change||0)} (+${topRiser?.ccu_change_pct||0}%)`
+            : `동접 ${fmt(rank2Game?.ccu)} · 전일 변동 없음`
+          }
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-label">📊 전체 동향</div>
         <div class="stat-value" style="font-size:17px">
-          <span style="color:var(--up)">↑${risingGames.length}</span>
-          <span style="color:var(--muted);font-weight:400;font-size:14px"> / </span>
-          <span style="color:var(--down)">↓${fallingGames.length}</span>
+          ${(risingGames.length > 0 || fallingGames.length > 0)
+            ? `<span style="color:var(--up)">↑${risingGames.length}</span>
+               <span style="color:var(--muted);font-weight:400;font-size:14px"> / </span>
+               <span style="color:var(--down)">↓${fallingGames.length}</span>`
+            : `<span style="color:var(--muted);font-size:13px;font-weight:400">전일 변동 없음</span>`
+          }
         </div>
-        <div class="stat-sub">전일 대비 합산 ${chuSign}${fmt(Math.abs(totalCcuChg))}</div>
+        <div class="stat-sub">
+          ${(risingGames.length > 0 || fallingGames.length > 0)
+            ? `전일 대비 합산 ${chuSign}${fmt(Math.abs(totalCcuChg))}`
+            : `Top 10 평균 동접 ${fmt(top10AvgCcu)}`
+          }
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-label">🔥 핫 장르 (Top 100)</div>
@@ -1099,7 +1133,12 @@ fetch('data.json?_='+Date.now())
       <div class="stat-card">
         <div class="stat-label">🆕 신규 진입</div>
         <div class="stat-value">${newEntries}</div>
-        <div class="stat-sub">오늘 처음 관측된 게임</div>
+        <div class="stat-sub">${newEntries > 0
+          ? '오늘 처음 관측된 게임'
+          : stableGames > 0
+            ? `${stableGames}개 게임 차트 유지`
+            : '차트 진입·이탈 없음'
+        }</div>
       </div>`;
 
     // ── 퍼블리싱 후보 (중소 개발사) ─────────────────────────────────────
@@ -1131,6 +1170,11 @@ fetch('data.json?_='+Date.now())
     const indyTopRiser  = [...indyRising].sort((a,b)=>(b.ccu_change_pct||0)-(a.ccu_change_pct||0))[0];
     const indyNew       = indyCandidates.filter(g => g.ccu_change==null);
     const bestRankIndy  = indyCandidates.reduce((b,g) => (!b||g.rank<b.rank)?g:b, null);
+    const anyIndyRising = indyRising.length > 0;
+    // 급상승 없을 때: Top CCU 인디 (1위는 최고 순위 카드에 표시되므로 2위 사용)
+    const topIndyCcu2   = window._indyCandidates[1] || window._indyCandidates[0];
+    // 인디 중 할인 중인 게임 수
+    const indyOnSale    = indyCandidates.filter(g => (g.discount_pct||0) > 0).length;
 
     document.getElementById('stats-indy').innerHTML = `
       <div class="stat-card" style="border-color:rgba(168,85,247,.4)">
@@ -1144,14 +1188,26 @@ fetch('data.json?_='+Date.now())
         <div class="stat-sub" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${bestRankIndy?.name||'-'}</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">📈 급상승 인디</div>
-        <div class="stat-value" style="font-size:13px;color:var(--up);line-height:1.3">${indyTopRiser?.name||'해당 없음'}</div>
-        <div class="stat-sub">${indyTopRiser ? '+'+indyTopRiser.ccu_change_pct+'% 상승' : ''}</div>
+        <div class="stat-label">📈 ${anyIndyRising ? '급상승 인디' : '동접 2위 인디'}</div>
+        <div class="stat-value" style="font-size:13px;color:${anyIndyRising?'var(--up)':'#fff'};line-height:1.3">
+          ${anyIndyRising ? (indyTopRiser?.name||'해당 없음') : (topIndyCcu2?.name||'-')}
+        </div>
+        <div class="stat-sub">
+          ${anyIndyRising
+            ? `+${indyTopRiser.ccu_change_pct}% 상승`
+            : `동접 ${fmt(topIndyCcu2?.ccu)} · 전일 변동 없음`
+          }
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-label">🆕 신규 진입 인디</div>
         <div class="stat-value">${indyNew.length}</div>
-        <div class="stat-sub">오늘 처음 관측된 중소개발사</div>
+        <div class="stat-sub">${indyNew.length > 0
+          ? '오늘 처음 관측된 중소개발사'
+          : indyOnSale > 0
+            ? `할인 진행 중 ${indyOnSale}개`
+            : `${indyCandidates.length}개 전일 차트 유지`
+        }</div>
       </div>`;
 
     // ── 롱런 stat 카드 ───────────────────────────────────────────────────
