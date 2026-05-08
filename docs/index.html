@@ -27,6 +27,15 @@
   header h1 { font-size: 20px; color: #fff; display: flex; align-items: center; gap: 10px; }
   header h1 span { color: var(--accent); }
   .updated { color: var(--muted); font-size: 12px; }
+  .data-status { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+    border: 1px solid;
+  }
+  .status-ok   { background: rgba(79,160,72,.12); color: var(--up);      border-color: rgba(79,160,72,.35); }
+  .status-warn { background: rgba(245,197,24,.12); color: var(--gold);   border-color: rgba(245,197,24,.35); }
+  .status-err  { background: rgba(201,64,64,.12);  color: var(--down);   border-color: rgba(201,64,64,.35); }
 
   .tabs { display: flex; gap: 3px; padding: 16px 32px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .tab {
@@ -239,7 +248,10 @@
 
 <header>
   <h1>🎮 Steam <span>Chart Monitor</span></h1>
-  <div class="updated" id="updated-label">불러오는 중...</div>
+  <div class="data-status">
+    <div class="updated" id="updated-label">불러오는 중...</div>
+    <div id="status-pills"></div>
+  </div>
 </header>
 
 <div class="tabs">
@@ -1020,6 +1032,27 @@ fetch('data.json?_='+Date.now())
     };
 
     document.getElementById('updated-label').textContent = `마지막 업데이트: ${data.updated}`;
+
+    // ── 데이터 상태 pill ─────────────────────────────────────────────────────
+    const accDays   = data.accumulated_days || 0;
+    const chgValid  = data.ccu_change_valid  ?? null;
+    const chgTotal  = data.ccu_change_total  ?? null;
+    const pillsEl   = document.getElementById('status-pills');
+    if (pillsEl) {
+      const daysCls  = accDays >= 2 ? 'status-ok' : 'status-warn';
+      const daysIcon = accDays >= 2 ? '✓' : '⚠';
+      const daysLbl  = accDays >= 2 ? `${accDays}일 누적` : `${accDays}일 누적 (전일 증감 없음)`;
+
+      let chgHtml = '';
+      if (chgValid !== null && chgTotal !== null) {
+        const pct = Math.round(chgValid / chgTotal * 100);
+        const cls = pct >= 80 ? 'status-ok' : pct >= 30 ? 'status-warn' : 'status-err';
+        const ico = pct >= 80 ? '✓' : '⚠';
+        chgHtml = `<span class="status-pill ${cls}">${ico} 전일증감 ${pct}% (${chgValid}/${chgTotal})</span>`;
+      }
+
+      pillsEl.innerHTML = `<span class="status-pill ${daysCls}">${daysIcon} ${daysLbl}</span>${chgHtml}`;
+    }
 
     // ── 오늘의 차트 stat 카드 (시장 전체 동향) ───────────────────────────
     const rows = data.today_chart || [];
