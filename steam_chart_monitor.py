@@ -21,6 +21,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import os
 import json
@@ -251,6 +252,50 @@ def _fetch_steamspy_game_details(appid: int) -> dict:
     return {}
 
 
+# ── Steam 공식 실시간 CCU API ─────────────────────────────────────────────────
+
+def _fetch_one_steam_ccu(appid: int) -> tuple:
+    """Steam ISteamUserStats/GetNumberOfCurrentPlayers API로 단일 게임 현재 CCU 조회.
+    공식 Steam API이며 인증 불필요. 조회 실패 시 -1 반환.
+    """
+    url = (
+        f"https://api.steampowered.com/ISteamUserStats/"
+        f"GetNumberOfCurrentPlayers/v1/?appid={appid}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            resp = r.json().get("response", {})
+            if resp.get("result") == 1:
+                return appid, int(resp.get("player_count", 0))
+    except Exception:
+        pass
+    return appid, -1
+
+
+def fetch_steam_ccu_bulk(appids: list, workers: int = 20) -> dict:
+    """Steam 공식 API로 여러 게임의 현재 CCU를 병렬 조회.
+    반환: {appid: player_count}  — 조회 실패 appid는 포함되지 않음.
+    """
+    result = {}
+    total  = len(appids)
+    print(f"  Steam 공식 CCU 병렬 조회 중... ({total}개, {workers} workers)")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_fetch_one_steam_ccu, aid): aid for aid in appids}
+        done = 0
+        for future in as_completed(futures):
+            aid, count = future.result()
+            done += 1
+            if count >= 0:
+                result[aid] = count
+            if done % 200 == 0:
+                print(f"    [{done}/{total}] CCU 조회 진행 중...")
+    ok   = len(result)
+    fail = total - ok
+    print(f"  ✓ Steam CCU 조회 완료: 성공 {ok}개 / 실패(폴백) {fail}개")
+    return result
+
+
 def fetch_gamalytic_followers(appid: int) -> int:
     """Gamalytic API로 Steam 팔로워 수 조회 (무료, 인증 불필요).
     정상 조회 시 팔로워 수(>=0), 조회 실패 시 -1 반환.
@@ -431,47 +476,72 @@ def fetch_upcoming_games() -> list:
 # ── 전일 대비 CCU 증감 계산 ───────────────────────────────────────────────────
 
 def add_ccu_change(today_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.DataFrame:
-    """오늘 CCU와 전일 CCU를 비교하여 증감 컬럼 추가"""
+    """오늘 CCU/순위와 전일 CCU/순위를 비교하여 증감 컬럼 추가.
+
+    추가 컬럼:
+      ccu_change      — 전일 대비 CCU 절대 증감 (Steam 공식 실시간 CCU 기준)
+      ccu_change_pct  — CCU 변화율(%)
+      rank_change     — 전일 대비 순위 변화 (양수 = 상승, 음수 = 하락)
+                        예) 전일 7위 → 오늘 4위: rank_change = +3
+    """
     today_df = today_df.copy()
 
+    def _set_null_changes(df):
+        df["ccu_change"]     = None
+        df["ccu_change_pct"] = None
+        df["rank_change"]    = None
+        return df
+
     if existing_df.empty:
-        print("  ⚠ 기존 데이터 없음 → 전일 증감 계산 불가 (ccu_change = null)")
-        today_df["ccu_change"]     = None
-        today_df["ccu_change_pct"] = None
-        return today_df
+        print("  ⚠ 기존 데이터 없음 → 전일 증감 계산 불가 (null)")
+        return _set_null_changes(today_df)
 
     today_str  = date.today().isoformat()
     prev_dates = existing_df[existing_df["date"] != today_str]["date"].unique()
 
     if len(prev_dates) == 0:
-        print("  ⚠ 전일 데이터 없음 (Excel에 오늘 데이터만 존재) → ccu_change = null")
-        today_df["ccu_change"]     = None
-        today_df["ccu_change_pct"] = None
-        return today_df
+        print("  ⚠ 전일 데이터 없음 (Excel에 오늘 데이터만 존재) → null")
+        return _set_null_changes(today_df)
 
     prev_date = max(prev_dates)
     print(f"  ✓ 전일 기준일: {prev_date}  (누적 날짜 수: {len(prev_dates)}일)")
-    prev_df   = existing_df[existing_df["date"] == prev_date][["appid", "ccu"]].copy()
-    prev_df   = prev_df.rename(columns={"ccu": "ccu_prev"})
 
     # appid 타입 통일 (int) — Excel float64 잔재 방어
-    prev_df["appid"]   = prev_df["appid"].astype(int)
-    today_df["appid"]  = today_df["appid"].astype(int)
+    today_df["appid"] = today_df["appid"].astype(int)
 
-    merged = today_df.merge(prev_df, on="appid", how="left")
-    matched = int(merged["ccu_prev"].notna().sum())
-    print(f"  ✓ 전일 매칭: {matched}/{len(merged)}개 게임 (매칭 실패 시 ccu_change=null)")
+    prev_ccu_df = (
+        existing_df[existing_df["date"] == prev_date][["appid", "ccu"]]
+        .copy()
+        .rename(columns={"ccu": "ccu_prev"})
+    )
+    prev_ccu_df["appid"] = prev_ccu_df["appid"].astype(int)
 
-    mask = merged["ccu_prev"].notna()
+    prev_rank_df = (
+        existing_df[existing_df["date"] == prev_date][["appid", "rank"]]
+        .copy()
+        .rename(columns={"rank": "rank_prev"})
+    )
+    prev_rank_df["appid"] = prev_rank_df["appid"].astype(int)
 
-    # float64 사용 — Int64(nullable) 는 pd.NA 를 생성해 openpyxl 오류 유발
-    ccu_diff = (merged["ccu"] - merged["ccu_prev"]).where(mask)   # float64, NaN
-    merged["ccu_change"]     = ccu_diff.where(mask)               # NaN → null in JSON / empty in Excel
+    merged = today_df.merge(prev_ccu_df, on="appid", how="left")
+    merged = merged.merge(prev_rank_df,  on="appid", how="left")
+
+    ccu_matched  = int(merged["ccu_prev"].notna().sum())
+    rank_matched = int(merged["rank_prev"].notna().sum())
+    print(f"  ✓ 전일 매칭: CCU {ccu_matched}/{len(merged)}개 / 순위 {rank_matched}/{len(merged)}개")
+
+    # ── CCU 증감 (float64 — Int64/pd.NA 는 openpyxl 오류 유발) ──────────────
+    ccu_mask = merged["ccu_prev"].notna()
+    merged["ccu_change"] = (merged["ccu"] - merged["ccu_prev"]).where(ccu_mask)
     merged["ccu_change_pct"] = (
         (merged["ccu"] - merged["ccu_prev"]) / merged["ccu_prev"] * 100
-    ).where(mask).round(1)
+    ).where(ccu_mask).round(1)
 
-    return merged.drop(columns=["ccu_prev"])
+    # ── 순위 증감 (양수=상승, 음수=하락) ───────────────────────────────────
+    rank_mask = merged["rank_prev"].notna()
+    merged["rank_change"] = (merged["rank_prev"] - merged["rank"]).where(rank_mask)
+
+    return merged.drop(columns=["ccu_prev", "rank_prev"])
 
 
 # ── 데이터 수집 ───────────────────────────────────────────────────────────────
@@ -523,7 +593,22 @@ def collect_today_data() -> pd.DataFrame:
             "original_price_krw": store["original_price_krw"],
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    # ── Steam 공식 실시간 CCU로 교체 (SteamSpy CCU는 다주간 평균이라 변동 미미) ──
+    print("\n▶ Steam 공식 실시간 CCU 조회 중...")
+    steam_ccu = fetch_steam_ccu_bulk(df["appid"].tolist())
+    df["ccu_steamspy"] = df["ccu"]   # SteamSpy 원본은 rank 근거로 보존
+    df["ccu"] = df["appid"].map(steam_ccu)
+    # 조회 실패한 게임은 SteamSpy CCU 폴백
+    fallback_mask = df["ccu"].isna()
+    df.loc[fallback_mask, "ccu"] = df.loc[fallback_mask, "ccu_steamspy"]
+    df["ccu"] = df["ccu"].fillna(0).astype(int)
+    n_real    = int((~fallback_mask).sum())
+    n_fallback = int(fallback_mask.sum())
+    print(f"  ✓ 실시간 CCU 적용: {n_real}개 / SteamSpy 폴백: {n_fallback}개")
+
+    return df
 
 
 # ── 롱런 분석 ─────────────────────────────────────────────────────────────────
@@ -618,6 +703,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
     SNAP_COLS = {
         "date":               "날짜",
         "rank":               "순위",
+        "rank_change":        "순위변동",
         "appid":              "AppID",
         "name":               "게임명",
         "developer":          "개발사",
@@ -625,7 +711,8 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         "genres":             "장르",
         "release_date":       "출시일",
         "owners_estimate":    "판매량(추정)",
-        "ccu":                "동접자",
+        "ccu":                "동접자(실시간)",
+        "ccu_steamspy":       "동접자(SteamSpy)",
         "ccu_change":         "전일증감",
         "ccu_change_pct":     "증감(%)",
         "review_score_pct":   "긍정리뷰(%)",
@@ -643,7 +730,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         if ri % 2 == 0:
             for ci in range(1, len(keys) + 1):
                 ws1.cell(ri, ci).fill = ALT_FILL
-    _set_col_widths(ws1, [12, 5, 10, 34, 24, 24, 22, 12, 14, 12, 10, 8, 10, 10, 10, 8, 10])
+    _set_col_widths(ws1, [12, 5, 8, 10, 34, 24, 24, 22, 12, 14, 14, 14, 10, 8, 10, 10, 10, 8, 10])
     ws1.freeze_panes = "A2"
 
     # ── 시트 2: 오늘의 차트 ─────────────────────────────────────────────────
@@ -786,7 +873,7 @@ def write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days: int = 0):
         return json.loads(d.to_json(orient="records", force_ascii=False))
 
     TODAY_COLS = [
-        "rank", "appid", "name", "developer", "publisher",
+        "rank", "rank_change", "appid", "name", "developer", "publisher",
         "genres", "release_date", "owners_estimate",
         "ccu", "ccu_change", "ccu_change_pct",
         "review_score_pct", "total_reviews",
@@ -823,11 +910,14 @@ def load_existing() -> pd.DataFrame:
         # 일별 스냅샷 헤더는 한글(날짜, 동접자...)로 저장되어 있음.
         # 영문 컬럼명으로 역매핑해야 add_ccu_change / analyze_longrun이 작동함.
         KR_TO_EN = {
-            "날짜": "date", "순위": "rank", "AppID": "appid",
+            "날짜": "date", "순위": "rank", "순위변동": "rank_change", "AppID": "appid",
             "게임명": "name", "개발사": "developer", "퍼블리셔": "publisher",
             "장르": "genres", "출시일": "release_date",
             "판매량(추정)": "owners_estimate",
-            "동접자": "ccu", "전일증감": "ccu_change", "증감(%)": "ccu_change_pct",
+            # 컬럼명 변경 전후 모두 지원 (하위 호환)
+            "동접자": "ccu", "동접자(실시간)": "ccu",
+            "동접자(SteamSpy)": "ccu_steamspy",
+            "전일증감": "ccu_change", "증감(%)": "ccu_change_pct",
             "긍정리뷰(%)": "review_score_pct", "리뷰수": "total_reviews",
             "가격(₩)": "price_krw", "할인(%)": "discount_pct",
             "정가(₩)": "original_price_krw",
