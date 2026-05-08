@@ -435,6 +435,7 @@ def add_ccu_change(today_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.Data
     today_df = today_df.copy()
 
     if existing_df.empty:
+        print("  ⚠ 기존 데이터 없음 → 전일 증감 계산 불가 (ccu_change = null)")
         today_df["ccu_change"]     = None
         today_df["ccu_change_pct"] = None
         return today_df
@@ -443,15 +444,24 @@ def add_ccu_change(today_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.Data
     prev_dates = existing_df[existing_df["date"] != today_str]["date"].unique()
 
     if len(prev_dates) == 0:
+        print("  ⚠ 전일 데이터 없음 (Excel에 오늘 데이터만 존재) → ccu_change = null")
         today_df["ccu_change"]     = None
         today_df["ccu_change_pct"] = None
         return today_df
 
     prev_date = max(prev_dates)
+    print(f"  ✓ 전일 기준일: {prev_date}  (누적 날짜 수: {len(prev_dates)}일)")
     prev_df   = existing_df[existing_df["date"] == prev_date][["appid", "ccu"]].copy()
     prev_df   = prev_df.rename(columns={"ccu": "ccu_prev"})
 
+    # appid 타입 통일 (int) — Excel float64 잔재 방어
+    prev_df["appid"]   = prev_df["appid"].astype(int)
+    today_df["appid"]  = today_df["appid"].astype(int)
+
     merged = today_df.merge(prev_df, on="appid", how="left")
+    matched = merged["ccu_prev"].notna().sum()
+    print(f"  ✓ 전일 매칭: {matched}/{len(merged)}개 게임 (매칭 실패 시 ccu_change=null)")
+
     merged["ccu_change"] = (merged["ccu"] - merged["ccu_prev"]).where(
         merged["ccu_prev"].notna()
     ).astype("Int64")
@@ -765,7 +775,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
 
 # ── JSON 출력 ─────────────────────────────────────────────────────────────────
 
-def write_json(today_df, lr1, lr2, lr1m, upcoming):
+def write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days: int = 0):
     def to_records(df, cols=None):
         if df.empty:
             return []
@@ -779,13 +789,20 @@ def write_json(today_df, lr1, lr2, lr1m, upcoming):
         "review_score_pct", "total_reviews",
         "price_krw", "discount_pct",
     ]
+    # ccu_change 유효 비율 계산 (진단용)
+    ccu_valid = int(today_df["ccu_change"].notna().sum()) if "ccu_change" in today_df.columns else 0
+    ccu_total = len(today_df)
+
     data = {
-        "updated":        date.today().isoformat(),
-        "today_chart":    to_records(today_df, TODAY_COLS),
-        "longrun_1w":     to_records(lr1),
-        "longrun_2w":     to_records(lr2),
-        "longrun_1m":     to_records(lr1m),
-        "upcoming_games": upcoming,
+        "updated":          date.today().isoformat(),
+        "accumulated_days": accumulated_days,       # 누적 수집 일수
+        "ccu_change_valid": ccu_valid,              # 전일 증감 계산된 게임 수
+        "ccu_change_total": ccu_total,              # 전체 게임 수
+        "today_chart":      to_records(today_df, TODAY_COLS),
+        "longrun_1w":       to_records(lr1),
+        "longrun_2w":       to_records(lr2),
+        "longrun_1m":       to_records(lr1m),
+        "upcoming_games":   upcoming,
     }
     os.makedirs(os.path.dirname(JSON_PATH), exist_ok=True)
     with open(JSON_PATH, "w", encoding="utf-8") as f:
@@ -862,8 +879,12 @@ def main():
     upcoming = fetch_upcoming_games()
 
     # 7. 저장
+    # 누적 날짜 수 계산 (today 포함)
+    acc_days = int(all_df["date"].nunique()) if not all_df.empty else 1
+    print(f"\n▶ 누적 데이터: {acc_days}일치 ({len(all_df)}행)")
+
     build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming)
-    write_json(today_df, lr1, lr2, lr1m, upcoming)
+    write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days=acc_days)
     print("  완료!\n")
 
 
