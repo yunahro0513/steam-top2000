@@ -14,6 +14,7 @@ SteamSpy API로 상위 1000개 게임을 매일 수집합니다.
   - 1주(7일) / 2주(14일) / 4주(28일) 이상 상위 1000위 유지
 """
 
+import argparse
 import re
 import requests
 import pandas as pd
@@ -988,9 +989,19 @@ def load_existing() -> pd.DataFrame:
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Steam Chart Monitor")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="데이터를 수집하지만 Excel/JSON에 저장하지 않음 (테스트용)"
+    )
+    args = parser.parse_args()
+    dry_run = args.dry_run
+
     today_str = date.today().isoformat()
     print(f"\n{'='*60}")
     print(f"  Steam Chart Monitor  |  {today_str}")
+    if dry_run:
+        print(f"  ⚠ DRY-RUN 모드 — 수집만 하고 저장하지 않습니다")
     print(f"{'='*60}")
 
     # 1. 오늘 데이터 수집
@@ -1023,13 +1034,16 @@ def main():
     upcoming = fetch_upcoming_games()
 
     # 7. 저장
-    # 누적 날짜 수 계산 (today 포함)
     acc_days = int(all_df["date"].nunique()) if not all_df.empty else 1
     print(f"\n▶ 누적 데이터: {acc_days}일치 ({len(all_df)}행)")
 
-    build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming)
-    write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days=acc_days)
-    print("  완료!\n")
+    if dry_run:
+        print("\n⚠ DRY-RUN 모드 — Excel/JSON 저장을 건너뜁니다.")
+        print("  (실제 저장하려면 --dry-run 없이 실행하세요)\n")
+    else:
+        build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming)
+        write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days=acc_days)
+        print("  완료!\n")
 
 
 if __name__ == "__main__":
