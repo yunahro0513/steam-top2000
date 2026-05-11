@@ -350,6 +350,15 @@
         <select class="f-select" id="genre-indy" onchange="applyFilters('indy')"><option value="">전체</option></select>
       </div>
       <div class="filter-group">
+        <span class="filter-label">뱃지</span>
+        <select class="f-select" id="badge-indy" onchange="applyFilters('indy')">
+          <option value="">전체</option>
+          <option value="NEW">🆕 NEW</option>
+          <option value="↑%">📈 급상승 (↑%)</option>
+          <option value="TOP">🏅 TOP 200</option>
+        </select>
+      </div>
+      <div class="filter-group">
         <span class="filter-label">동접</span>
         <input class="f-input narrow" id="ccu-min-indy" type="number" placeholder="최소" oninput="applyFilters('indy')" />
         <span class="filter-label">~</span>
@@ -803,6 +812,7 @@ function buildGenreOptions(key, rows) {
 function applyFilters(key) {
   const q      = (document.getElementById(`search-${key}`)?.value||'').toLowerCase();
   const genre  = document.getElementById(`genre-${key}`)?.value||'';
+  const badge  = document.getElementById(`badge-${key}`)?.value||'';
   const ccuMin = parseInt(document.getElementById(`ccu-min-${key}`)?.value)||0;
   const ccuMaxV= document.getElementById(`ccu-max-${key}`)?.value;
   const ccuMax = ccuMaxV ? parseInt(ccuMaxV) : Infinity;
@@ -821,7 +831,8 @@ function applyFilters(key) {
     const genreMatch = !genre || (g.genres||'').includes(genre);
     const ccuVal     = isChart ? (g.ccu||0) : (g.latest_ccu||0);
     const ccuMatch   = ccuVal>=ccuMin && ccuVal<=ccuMax;
-    return nameMatch && genreMatch && ccuMatch;
+    const badgeMatch = !badge || (window._indyBadgeMap?.get(g.appid)||[]).includes(badge);
+    return nameMatch && genreMatch && ccuMatch && badgeMatch;
   });
 
   pages[key] = 1;
@@ -831,7 +842,7 @@ function applyFilters(key) {
 }
 
 function resetFilters(key) {
-  ['search','genre','ccu-min','ccu-max'].forEach(id => {
+  ['search','genre','badge','ccu-min','ccu-max'].forEach(id => {
     const el = document.getElementById(`${id}-${key}`);
     if (el) el.value = '';
   });
@@ -856,10 +867,13 @@ function renderChartRow(g, key) {
     rowCls = disc>0 ? 'row-discount' : (chg>0 ? 'row-up' : chg<0 ? 'row-down' : '');
   }
   const rankCls = g.rank<=10 ? 'rank rank-top' : 'rank';
-  // 퍼블리싱 후보 하이라이트 게임엔 이름 옆에 뱃지 표시
-  const hlBadge = (key==='indy' && window._highlightIndySet?.has(g.appid))
-    ? `<span style="margin-left:5px;font-size:10px;background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple);border-radius:3px;padding:1px 5px;vertical-align:middle">${g.ccu_change==null?'NEW':(g.ccu_change_pct||0)>=15?`↑${g.ccu_change_pct}%`:'TOP'}</span>`
-    : '';
+  // 퍼블리싱 후보: 해당하는 모든 뱃지 표시 (NEW / ↑% / TOP)
+  const _badges = (key==='indy') ? (window._indyBadgeMap?.get(g.appid) || []) : [];
+  const hlBadge = _badges.map(b => {
+    if (b === 'NEW') return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:var(--purple-bg);color:var(--purple);border:1px solid rgba(168,85,247,.5);border-radius:3px;padding:1px 5px;vertical-align:middle">NEW</span>`;
+    if (b === '↑%')  return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:var(--green-bg);color:var(--up);border:1px solid rgba(79,160,72,.5);border-radius:3px;padding:1px 5px;vertical-align:middle">↑${g.ccu_change_pct}%</span>`;
+    /* TOP */        return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:rgba(102,192,244,.1);color:var(--accent);border:1px solid rgba(102,192,244,.4);border-radius:3px;padding:1px 5px;vertical-align:middle">TOP</span>`;
+  }).join('');
   return `<tr class="${rowCls}">
     <td class="${rankCls}" style="white-space:nowrap">${rankFmt(g.rank, g.rank_change)}</td>
     <td class="game-name"><a href="https://store.steampowered.com/app/${g.appid}" target="_blank">${g.name}</a>${hlBadge}</td>
@@ -1319,6 +1333,17 @@ fetch('data.json?_='+Date.now())
       g.rank <= 200;
     const hlArr = [...indyCandidates].filter(isPublishHL).slice(0, 25);
     window._highlightIndySet = new Set(hlArr.map(g => g.appid));
+
+    // 뱃지 맵: 모든 인디 후보에 대해 해당하는 뱃지 목록 (NEW / ↑% / TOP)
+    const indyBadgeMap = new Map();
+    indyCandidates.forEach(g => {
+      const badges = [];
+      if (g.ccu_change == null) badges.push('NEW');
+      if ((g.ccu_change_pct || 0) >= 15) badges.push('↑%');
+      if (g.rank <= 200) badges.push('TOP');
+      if (badges.length) indyBadgeMap.set(g.appid, badges);
+    });
+    window._indyBadgeMap = indyBadgeMap;
 
     const indyRising    = indyCandidates.filter(g => (g.ccu_change||0) > 0);
     const indyTopRiser  = [...indyRising].sort((a,b)=>(b.ccu_change_pct||0)-(a.ccu_change_pct||0))[0];
