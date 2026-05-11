@@ -464,31 +464,27 @@ def _enrich_upcoming_item(appid: int, name_fallback: str, header_image_fallback:
 
 
 def _fetch_upcoming_search(seen: set, date_from, date_to) -> list:
-    """Steam 검색 API로 출시 예정 게임 수집.
+    """Steam 검색 API로 인기 출시 예정 게임 수집.
 
-    filter=comingsoon 파라미터로 Steam 전체 upcoming 게임을 가져옴.
-    featuredcategories 의 소수 큐레이션 게임 외 실제 출시 예정작을 보완.
+    filter=popularcomingsoon — Steam 인기 예정작 순위
+    (store.steampowered.com/search/?filter=popularcomingsoon&os=win 과 동일 소스)
+    인기순이므로 날짜 사전 필터 없이 전체 수집 후 메인 루프에서 범위 적용.
     """
     items = []
     url = (
         "https://store.steampowered.com/search/results/"
-        "?sort_by=Released_ASC&filter=comingsoon"
+        "?filter=popularcomingsoon&os=win"
         "&category1=998&count=100&cc=kr&l=koreana&json=1"
     )
     try:
         r    = requests.get(url, headers=HEADERS, timeout=15)
         data = r.json()
         raw  = data.get("items", [])
-        print(f"  [Steam 검색 upcoming] {len(raw)}개")
+        print(f"  [Steam 인기 예정작 popularcomingsoon] {len(raw)}개")
         for it in raw:
             aid = it.get("id") or it.get("appid")
             if not aid or aid in seen:
                 continue
-            # release_str 예: "11 May, 2026" — 범위 내인지 사전 확인
-            rel_str = (it.get("release_date") or "").strip()
-            parsed  = _parse_date(rel_str) if rel_str else None
-            if parsed is not None and not (date_from <= parsed <= date_to):
-                continue   # 범위 밖이면 appdetails 호출 낭비 방지
             seen.add(aid)
             items.append({
                 "id":           aid,
@@ -496,7 +492,7 @@ def _fetch_upcoming_search(seen: set, date_from, date_to) -> list:
                 "header_image": it.get("logo", "") or it.get("header_image", ""),
             })
     except Exception as e:
-        print(f"  ⚠ Steam 검색 upcoming 실패: {e}")
+        print(f"  ⚠ Steam 인기 예정작 수집 실패: {e}")
     return items
 
 
@@ -505,7 +501,7 @@ def fetch_upcoming_games() -> list:
     Steam 신작 캘린더 수집.
 
     소스 ①  featuredcategories API — Steam 큐레이션 coming_soon / new_releases
-    소스 ②  Steam 검색 API (filter=comingsoon) — 전체 출시 예정작 (최대 100개)
+    소스 ②  Steam 검색 API (filter=popularcomingsoon) — 인기 출시 예정작 (최대 100개)
 
     두 소스를 합산·중복 제거 후 각 게임의 appdetails 수집.
     - Gamalytic API로 팔로워 수 조회 → 500 미만 게임 제외
@@ -514,8 +510,8 @@ def fetch_upcoming_games() -> list:
     """
     print("▶ 신작 캘린더 수집 중...")
     today     = today_kst()
-    date_from = today - timedelta(days=7)   # 최근 1주 출시 포함
-    date_to   = today + timedelta(days=60)  # 이번 달 + 다음 달까지 예정작 포함
+    date_from = today - timedelta(days=7)    # 최근 1주 출시 포함
+    date_to   = today + timedelta(days=180)  # 6개월 이내 예정작 포함 (인기작은 일찍 공개)
 
     seen  = set()
     items = []
@@ -651,20 +647,54 @@ def add_ccu_change(today_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.Data
 
 # ── 데이터 수집 ───────────────────────────────────────────────────────────────
 
-def collect_today_data() -> pd.DataFrame:
+def collect_today_data(existing_df=None) -> pd.DataFrame:
     print("▶ SteamSpy API 상위 1000 게임 수집 중...")
     sp_games = fetch_steamspy_top(TOP_N)
     print(f"  총 {len(sp_games)}개 게임 수집 완료")
+
+    # ── 스토어 캐시 구성 ────────────────────────────────────────────────────────
+    # 출시일·장르는 변하지 않으므로 전날 데이터에서 재사용 → API 호출 대폭 절약
+    # 가격·할인도 캐시하되, 새 게임이나 캐시 누락 시에만 API 호출
+    store_cache: dict = {}
+    if existing_df is not None and not existing_df.empty:
+        cache_cols = ["appid", "release_date", "genres",
+                      "price_krw", "original_price_krw", "discount_pct"]
+        avail = [c for c in cache_cols if c in existing_df.columns]
+        sub = existing_df[["date"] + [c for c in avail]].copy() if "date" in existing_df.columns \
+              else existing_df[avail].copy()
+        # release_date 와 genres 둘 다 있는 행만 캐시 대상
+        mask = sub["release_date"].notna() & sub["genres"].notna()
+        sub  = sub[mask]
+        if not sub.empty:
+            if "date" in sub.columns:
+                sub = sub.sort_values("date").groupby("appid").last().reset_index()
+            for _, row in sub.iterrows():
+                aid = int(row["appid"])
+                store_cache[aid] = {
+                    "release_date":       row.get("release_date"),
+                    "genres":             row.get("genres"),
+                    "price_krw":          row.get("price_krw"),
+                    "original_price_krw": row.get("original_price_krw"),
+                    "discount_pct":       row.get("discount_pct") or 0,
+                }
+        print(f"  스토어 캐시 {len(store_cache)}개 — 미캐시 게임만 Steam API 호출")
 
     today_str = today_kst().isoformat()
     rows = []
 
     for i, g in enumerate(sp_games, 1):
-        print(f"  [{i:4d}/{len(sp_games)}] AppID {g['appid']} ({g['name_sp'][:30]})")
+        appid = g["appid"]
 
-        store   = fetch_store_details(g["appid"])
-        reviews = fetch_reviews(g["appid"])
-        time.sleep(0.5)
+        if appid in store_cache:
+            store = store_cache[appid]
+            print(f"  [{i:4d}/{len(sp_games)}] {appid} ({g['name_sp'][:28]}) [캐시]")
+        else:
+            print(f"  [{i:4d}/{len(sp_games)}] {appid} ({g['name_sp'][:28]}) [API]")
+            store = fetch_store_details(appid)
+            time.sleep(0.5)
+
+        reviews = fetch_reviews(appid)
+        time.sleep(0.3)
 
         name = g["name_sp"]  # Steam Store API는 이제 name 미반환, SteamSpy 이름 사용
 
@@ -672,7 +702,7 @@ def collect_today_data() -> pd.DataFrame:
         developer = g.get("developer")
         publisher = g.get("publisher")
         if not developer and not publisher:
-            developer, publisher = fetch_dev_pub_from_store(g["appid"])
+            developer, publisher = fetch_dev_pub_from_store(appid)
             time.sleep(0.3)
         # 장르: Steam API를 1차, SteamSpy를 보조로
         genres = store["genres"] or g.get("genre_sp")
@@ -683,7 +713,7 @@ def collect_today_data() -> pd.DataFrame:
         rows.append({
             "date":               today_str,
             "rank":               g["rank"],
-            "appid":              g["appid"],
+            "appid":              appid,
             "name":               name,
             "developer":          developer,
             "publisher":          publisher,
@@ -1073,13 +1103,13 @@ def main():
         print(f"  ⚠ DRY-RUN 모드 — 수집만 하고 저장하지 않습니다")
     print(f"{'='*60}")
 
-    # 1. 오늘 데이터 수집
-    today_df = collect_today_data()
-
-    # 2. 기존 데이터 로드
+    # 1. 기존 데이터 로드 (스토어 캐시로 활용)
     existing = load_existing()
     if not existing.empty:
         existing = existing[existing["date"] != today_str]
+
+    # 2. 오늘 데이터 수집 (캐시 전달로 불필요한 API 호출 절약)
+    today_df = collect_today_data(existing_df=existing)
 
     # 3. 전일대비 CCU 증감 계산
     today_df = add_ccu_change(today_df, existing)
