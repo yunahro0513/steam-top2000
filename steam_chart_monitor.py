@@ -21,8 +21,17 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime as _dt, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# GitHub Actions 서버는 UTC 기준 — 수집 날짜를 KST(+9)로 명시적 변환
+KST = timezone(timedelta(hours=9))
+
+def today_kst() -> date:
+    """현재 날짜를 KST(한국시간) 기준으로 반환.
+    UTC+0 서버에서 실행되는 GitHub Actions 환경에서 날짜 불일치를 방지.
+    """
+    return _dt.now(KST).date()
 import time
 import os
 import json
@@ -219,18 +228,52 @@ def fetch_reviews(appid: int) -> dict:
 
 def _parse_date(date_str: str):
     """날짜 문자열을 date 객체로 파싱.
-    지원 형식: '10 May, 2026' / 'May 10, 2026' / '10 May 2026' / '2026-05-10'
-    파싱 실패 시 None 반환.
+
+    지원 형식:
+      정확한 날짜  : '10 May, 2026' / 'May 10, 2026' / '2026-05-10' 등
+      월+연도     : 'May 2026' / 'May, 2026' → 해당 월 1일
+      분기        : 'Q1 2026' / 'Q3 2026'   → 해당 분기 첫 달 1일
+      연도만      : '2026'                   → 1월 1일
+      Early/Late  : 'Early 2026' / 'Late 2026' → 1월 / 10월 1일
+    파싱 불가(Coming Soon, TBA 등)는 None 반환.
     """
-    from datetime import datetime as _dt
     if not date_str:
         return None
+    s = date_str.strip()
+
+    # 1) 정확한 날짜 형식
     for fmt in ("%d %b, %Y", "%b %d, %Y", "%d %B, %Y", "%B %d, %Y",
                 "%d %b %Y", "%B %d %Y", "%Y-%m-%d", "%d/%m/%Y"):
         try:
-            return _dt.strptime(date_str.strip(), fmt).date()
+            return _dt.strptime(s, fmt).date()
         except ValueError:
             pass
+
+    # 2) "Month YYYY" 또는 "Month, YYYY"
+    s_clean = s.replace(",", "").strip()
+    for fmt in ("%b %Y", "%B %Y"):
+        try:
+            return _dt.strptime(s_clean, fmt).date()
+        except ValueError:
+            pass
+
+    # 3) "Q1 2026" ~ "Q4 YYYY" → 해당 분기 첫째 달 1일
+    q_m = re.match(r'Q([1-4])\s+(\d{4})', s, re.IGNORECASE)
+    if q_m:
+        month = (int(q_m.group(1)) - 1) * 3 + 1
+        return date(int(q_m.group(2)), month, 1)
+
+    # 4) "Early / Mid / Late YYYY" → 1월 / 6월 / 10월 1일
+    em_m = re.match(r'(Early|Mid|Late)\s+(\d{4})', s, re.IGNORECASE)
+    if em_m:
+        qual  = em_m.group(1).lower()
+        month = 1 if qual == 'early' else (6 if qual == 'mid' else 10)
+        return date(int(em_m.group(2)), month, 1)
+
+    # 5) 연도만 "2026"
+    if re.fullmatch(r'\d{4}', s):
+        return date(int(s), 1, 1)
+
     return None
 
 
@@ -454,7 +497,7 @@ def fetch_upcoming_games() -> list:
     - 10,000+ 팔로워 게임은 HTML 대시보드에서 강조 표시
     """
     print("▶ 신작 캘린더 수집 중...")
-    today     = date.today()
+    today     = today_kst()
     date_from = today - timedelta(days=7)   # 최근 1주 출시 포함
     date_to   = today + timedelta(days=60)  # 이번 달 + 다음 달까지 예정작 포함
 
@@ -542,7 +585,7 @@ def add_ccu_change(today_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.Data
         print("  ⚠ 기존 데이터 없음 → 전일 증감 계산 불가 (null)")
         return _set_null_changes(today_df)
 
-    today_str  = date.today().isoformat()
+    today_str  = today_kst().isoformat()
     prev_dates = existing_df[existing_df["date"] != today_str]["date"].unique()
 
     if len(prev_dates) == 0:
@@ -597,7 +640,7 @@ def collect_today_data() -> pd.DataFrame:
     sp_games = fetch_steamspy_top(TOP_N)
     print(f"  총 {len(sp_games)}개 게임 수집 완료")
 
-    today_str = date.today().isoformat()
+    today_str = today_kst().isoformat()
     rows = []
 
     for i, g in enumerate(sp_games, 1):
@@ -650,6 +693,9 @@ def collect_today_data() -> pd.DataFrame:
     fallback_mask = df["ccu"].isna()
     df.loc[fallback_mask, "ccu"] = df.loc[fallback_mask, "ccu_steamspy"]
     df["ccu"] = df["ccu"].fillna(0).astype(int)
+    # CCU 출처 추적: Steam 공식=steam / 폴백=steamspy
+    df["ccu_source"] = "steam"
+    df.loc[fallback_mask, "ccu_source"] = "steamspy"
     n_real     = int((~fallback_mask).sum())
     n_fallback = int(fallback_mask.sum())
     print(f"  ✓ 실시간 CCU 적용: {n_real}개 / SteamSpy 폴백: {n_fallback}개")
@@ -765,6 +811,7 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         "owners_estimate":    "판매량(추정)",
         "ccu":                "동접자(실시간)",
         "ccu_steamspy":       "동접자(SteamSpy)",
+        "ccu_source":         "CCU출처",
         "ccu_change":         "전일증감",
         "ccu_change_pct":     "증감(%)",
         "review_score_pct":   "긍정리뷰(%)",
@@ -782,12 +829,12 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         if ri % 2 == 0:
             for ci in range(1, len(keys) + 1):
                 ws1.cell(ri, ci).fill = ALT_FILL
-    _set_col_widths(ws1, [12, 5, 8, 10, 34, 24, 24, 22, 12, 14, 14, 14, 10, 8, 10, 10, 10, 8, 10])
+    _set_col_widths(ws1, [12, 5, 8, 10, 34, 24, 24, 22, 12, 14, 14, 10, 14, 10, 8, 10, 10, 10, 8, 10])
     ws1.freeze_panes = "A2"
 
     # ── 시트 2: 오늘의 차트 ─────────────────────────────────────────────────
     ws2 = wb.create_sheet("오늘의 차트")
-    ws2["A1"] = f"Steam 인기 차트 — {date.today().isoformat()}"
+    ws2["A1"] = f"Steam 인기 차트 — {today_kst().isoformat()}"
     ws2["A1"].font = Font(bold=True, size=13, color="1F4E79")
     ws2.append([])
     T_COLS = ["순위", "게임명", "개발사", "퍼블리셔", "장르", "출시일", "판매량(추정)",
@@ -872,15 +919,15 @@ def build_excel(all_df, today_df, lr1, lr2, lr1m, upcoming):
         ws.freeze_panes = "A4"
 
     write_lr(wb.create_sheet("스테디셀러 7일+"),
-             f"스테디셀러 — 7일+ 상위 1000위 유지 — {date.today().isoformat()}", lr1, LRN1_FILL, LONGRUN_1W)
+             f"스테디셀러 — 7일+ 상위 1000위 유지 — {today_kst().isoformat()}", lr1, LRN1_FILL, LONGRUN_1W)
     write_lr(wb.create_sheet("스테디셀러 14일+"),
-             f"스테디셀러 — 14일+ 상위 1000위 유지 — {date.today().isoformat()}", lr2, LRN1_FILL, LONGRUN_2W)
+             f"스테디셀러 — 14일+ 상위 1000위 유지 — {today_kst().isoformat()}", lr2, LRN1_FILL, LONGRUN_2W)
     write_lr(wb.create_sheet("장기흥행 30일+"),
-             f"장기 흥행 — 30일+ 상위 1000위 유지 — {date.today().isoformat()}", lr1m, LRN4_FILL, LONGRUN_1M)
+             f"장기 흥행 — 30일+ 상위 1000위 유지 — {today_kst().isoformat()}", lr1m, LRN4_FILL, LONGRUN_1M)
 
     # ── 시트 6: 신작 캘린더 ─────────────────────────────────────────────────
     ws6 = wb.create_sheet("신작 캘린더")
-    ws6["A1"] = f"Steam 주목 출시 예정 게임 — {date.today().isoformat()}"
+    ws6["A1"] = f"Steam 주목 출시 예정 게임 — {today_kst().isoformat()}"
     ws6["A1"].font = Font(bold=True, size=13, color="6A1B9A")
     ws6.append([])
     UPC_COLS = ["게임명", "개발사", "퍼블리셔", "장르", "팔로워", "출시예정일", "상태", "가격(₩)", "AppID"]
@@ -927,19 +974,24 @@ def write_json(today_df, lr1, lr2, lr1m, upcoming, accumulated_days: int = 0):
     TODAY_COLS = [
         "rank", "rank_change", "appid", "name", "developer", "publisher",
         "genres", "release_date", "owners_estimate",
-        "ccu", "ccu_change", "ccu_change_pct",
+        "ccu", "ccu_source", "ccu_change", "ccu_change_pct",
         "review_score_pct", "total_reviews",
         "price_krw", "discount_pct",
     ]
     # ccu_change 유효 비율 계산 (진단용)
-    ccu_valid = int(today_df["ccu_change"].notna().sum()) if "ccu_change" in today_df.columns else 0
-    ccu_total = len(today_df)
+    ccu_valid     = int(today_df["ccu_change"].notna().sum()) if "ccu_change" in today_df.columns else 0
+    ccu_total     = len(today_df)
+    # CCU 출처 통계
+    ccu_steam_ok  = int((today_df["ccu_source"] == "steam").sum())    if "ccu_source" in today_df.columns else None
+    ccu_sp_fallbk = int((today_df["ccu_source"] == "steamspy").sum()) if "ccu_source" in today_df.columns else None
 
     data = {
-        "updated":          date.today().isoformat(),
-        "accumulated_days": accumulated_days,       # 누적 수집 일수
-        "ccu_change_valid": ccu_valid,              # 전일 증감 계산된 게임 수
-        "ccu_change_total": ccu_total,              # 전체 게임 수
+        "updated":               today_kst().isoformat(),
+        "accumulated_days":      accumulated_days,   # 누적 수집 일수
+        "ccu_change_valid":      ccu_valid,           # 전일 증감 계산된 게임 수
+        "ccu_change_total":      ccu_total,           # 전체 게임 수
+        "ccu_steam_ok":          ccu_steam_ok,        # Steam 공식 CCU 성공 수
+        "ccu_steamspy_fallback": ccu_sp_fallbk,       # SteamSpy 폴백 수
         "today_chart":      to_records(today_df, TODAY_COLS),
         "longrun_1w":       to_records(lr1),
         "longrun_2w":       to_records(lr2),
@@ -969,6 +1021,7 @@ def load_existing() -> pd.DataFrame:
             # 컬럼명 변경 전후 모두 지원 (하위 호환)
             "동접자": "ccu", "동접자(실시간)": "ccu",
             "동접자(SteamSpy)": "ccu_steamspy",
+            "CCU출처": "ccu_source",
             "전일증감": "ccu_change", "증감(%)": "ccu_change_pct",
             "긍정리뷰(%)": "review_score_pct", "리뷰수": "total_reviews",
             "가격(₩)": "price_krw", "할인(%)": "discount_pct",
@@ -997,7 +1050,7 @@ def main():
     args = parser.parse_args()
     dry_run = args.dry_run
 
-    today_str = date.today().isoformat()
+    today_str = today_kst().isoformat()
     print(f"\n{'='*60}")
     print(f"  Steam Chart Monitor  |  {today_str}")
     if dry_run:
