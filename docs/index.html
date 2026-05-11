@@ -308,6 +308,15 @@
         <select class="f-select" id="genre-today" onchange="applyFilters('today')"><option value="">전체</option></select>
       </div>
       <div class="filter-group">
+        <span class="filter-label">뱃지</span>
+        <select class="f-select" id="badge-today" onchange="applyFilters('today')">
+          <option value="">전체</option>
+          <option value="NEW">🆕 NEW</option>
+          <option value="↑%">📈 급상승</option>
+          <option value="TOP">🏅 TOP 200</option>
+        </select>
+      </div>
+      <div class="filter-group">
         <span class="filter-label">동접</span>
         <input class="f-input narrow" id="ccu-min-today" type="number" placeholder="최소" oninput="applyFilters('today')" />
         <span class="filter-label">~</span>
@@ -831,7 +840,9 @@ function applyFilters(key) {
     const genreMatch = !genre || (g.genres||'').includes(genre);
     const ccuVal     = isChart ? (g.ccu||0) : (g.latest_ccu||0);
     const ccuMatch   = ccuVal>=ccuMin && ccuVal<=ccuMax;
-    const badgeMatch = !badge || (window._indyBadgeMap?.get(g.appid)||[]).includes(badge);
+    const _bmap = key === 'indy'  ? window._indyBadgeMap  :
+                  key === 'today' ? window._todayBadgeMap : null;
+    const badgeMatch = !badge || (_bmap?.get(g.appid)||[]).includes(badge);
     return nameMatch && genreMatch && ccuMatch && badgeMatch;
   });
 
@@ -867,11 +878,13 @@ function renderChartRow(g, key) {
     rowCls = disc>0 ? 'row-discount' : (chg>0 ? 'row-up' : chg<0 ? 'row-down' : '');
   }
   const rankCls = g.rank<=10 ? 'rank rank-top' : 'rank';
-  // 퍼블리싱 후보: 해당하는 모든 뱃지 표시 (NEW / ↑% / TOP)
-  const _badges = (key==='indy') ? (window._indyBadgeMap?.get(g.appid) || []) : [];
+  // 오늘의 차트 / 퍼블리싱 후보: 해당하는 모든 뱃지 표시 (NEW / ↑% / TOP)
+  const _badgeMap = key === 'indy'  ? window._indyBadgeMap  :
+                    key === 'today' ? window._todayBadgeMap : null;
+  const _badges = _badgeMap?.get(g.appid) || [];
   const hlBadge = _badges.map(b => {
     if (b === 'NEW') return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:var(--purple-bg);color:var(--purple);border:1px solid rgba(168,85,247,.5);border-radius:3px;padding:1px 5px;vertical-align:middle">NEW</span>`;
-    if (b === '↑%')  return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:var(--green-bg);color:var(--up);border:1px solid rgba(79,160,72,.5);border-radius:3px;padding:1px 5px;vertical-align:middle">↑${g.ccu_change_pct}%</span>`;
+    if (b === '↑%')  return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:var(--green-bg);color:var(--up);border:1px solid rgba(79,160,72,.5);border-radius:3px;padding:1px 5px;vertical-align:middle">급상승</span>`;
     /* TOP */        return `<span style="margin-left:5px;font-size:10px;font-weight:700;background:rgba(102,192,244,.1);color:var(--accent);border:1px solid rgba(102,192,244,.4);border-radius:3px;padding:1px 5px;vertical-align:middle">TOP</span>`;
   }).join('');
   return `<tr class="${rowCls}">
@@ -1226,10 +1239,12 @@ fetch('data.json?_='+Date.now())
     document.getElementById('updated-label').textContent = `마지막 업데이트: ${data.updated}`;
 
     // ── 데이터 상태 pill ─────────────────────────────────────────────────────
-    const accDays   = data.accumulated_days || 0;
-    const chgValid  = data.ccu_change_valid  ?? null;
-    const chgTotal  = data.ccu_change_total  ?? null;
-    const pillsEl   = document.getElementById('status-pills');
+    const accDays    = data.accumulated_days    || 0;
+    const chgValid   = data.ccu_change_valid    ?? null;
+    const chgTotal   = data.ccu_change_total    ?? null;
+    const steamOk    = data.ccu_steam_ok        ?? null;
+    const spFallback = data.ccu_steamspy_fallback ?? null;
+    const pillsEl    = document.getElementById('status-pills');
     if (pillsEl) {
       const daysCls  = accDays >= 2 ? 'status-ok' : 'status-warn';
       const daysIcon = accDays >= 2 ? '✓' : '⚠';
@@ -1243,7 +1258,16 @@ fetch('data.json?_='+Date.now())
         chgHtml = `<span class="status-pill ${cls}">${ico} 전일증감 ${pct}% (${chgValid}/${chgTotal})</span>`;
       }
 
-      pillsEl.innerHTML = `<span class="status-pill ${daysCls}">${daysIcon} ${daysLbl}</span>${chgHtml}`;
+      let ccuSrcHtml = '';
+      if (steamOk !== null && spFallback !== null) {
+        const srcTotal = steamOk + spFallback;
+        const srcPct   = srcTotal > 0 ? Math.round(steamOk / srcTotal * 100) : 0;
+        const srcCls   = srcPct >= 95 ? 'status-ok' : srcPct >= 80 ? 'status-warn' : 'status-err';
+        const srcIco   = srcPct >= 95 ? '📡' : '⚠';
+        ccuSrcHtml = `<span class="status-pill ${srcCls}" title="Steam 공식 CCU ${steamOk}개 / SteamSpy 폴백 ${spFallback}개">${srcIco} Steam실시간 ${srcPct}%${spFallback > 0 ? ` (폴백 ${spFallback})` : ''}</span>`;
+      }
+
+      pillsEl.innerHTML = `<span class="status-pill ${daysCls}">${daysIcon} ${daysLbl}</span>${chgHtml}${ccuSrcHtml}`;
     }
 
     // ── 오늘의 차트 stat 카드 (시장 전체 동향) ───────────────────────────
@@ -1269,6 +1293,17 @@ fetch('data.json?_='+Date.now())
       ? [...risingGames].sort((a,b) => (b.ccu_change||0) - (a.ccu_change||0)).slice(0, 30)
       : rows.slice(0, 30);
     window._topRisersSet = new Set(top30Risers.map(g => g.appid));
+
+    // 오늘의 차트 뱃지 맵 (NEW / ↑% / TOP 200)
+    const todayBadgeMap = new Map();
+    rows.forEach(g => {
+      const badges = [];
+      if (g.ccu_change == null)              badges.push('NEW');
+      if ((g.ccu_change_pct || 0) >= 15)    badges.push('↑%');
+      if (g.rank <= 200)                     badges.push('TOP');
+      if (badges.length) todayBadgeMap.set(g.appid, badges);
+    });
+    window._todayBadgeMap = todayBadgeMap;
 
     document.getElementById('stats-today').innerHTML = `
       <div class="stat-card">
