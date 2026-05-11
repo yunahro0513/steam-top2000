@@ -130,31 +130,47 @@ def fetch_steamspy_top(n: int = 1000) -> list:
 def fetch_store_details(appid: int) -> dict:
     """Steam Store API: 장르, 출시일, 가격
 
-    filters=basic 은 name 외에 아무것도 반환하지 않으므로 사용하지 않음.
-    release_date / genres / price_overview 를 개별 필터로 요청.
+    filters 파라미터 없이 전체 응답을 받아 is_free 필드로 무료/유료를 정확히 구분.
+    - is_free=True  → price_krw = 0  (무료)
+    - is_free=False, price_overview 있음 → 실제 가격
+    - is_free=False, price_overview 없음 → None (지역 미지원 또는 API 실패)
     name / developer / publisher 는 SteamSpy 값을 1차 소스로 사용.
     """
     url = (
         f"https://store.steampowered.com/api/appdetails/"
-        f"?appids={appid}&cc=kr&filters=release_date,genres,price_overview"
+        f"?appids={appid}&cc=kr"
     )
     try:
         r   = requests.get(url, headers=HEADERS, cookies=STEAM_COOKIES, timeout=12)
         raw = r.json().get(str(appid))
         app = raw or {}
         if app.get("success") and app.get("data"):
-            d = app["data"]
-            p      = d.get("price_overview", {})
-            genres = ", ".join(g["description"] for g in d.get("genres", []))
-            rd     = d.get("release_date", {})
+            d       = app["data"]
+            is_free = d.get("is_free", False)
+            p       = d.get("price_overview")   # 무료 게임은 None, 유료는 dict
+            genres  = ", ".join(g["description"] for g in d.get("genres", []))
+            rd      = d.get("release_date", {})
             # coming_soon=True 이거나 날짜가 없으면 None
             release_date = rd.get("date") if (rd and not rd.get("coming_soon") and rd.get("date")) else None
+            if is_free:
+                price_krw          = 0
+                discount_pct       = 0
+                original_price_krw = 0
+            elif p:
+                price_krw          = p.get("final",            0) // 100
+                discount_pct       = p.get("discount_percent", 0)
+                original_price_krw = p.get("initial",          0) // 100
+            else:
+                # 유료지만 price_overview 없음 = 지역 미지원 또는 데이터 누락
+                price_krw          = None
+                discount_pct       = 0
+                original_price_krw = None
             return {
                 "genres":             genres or None,
                 "release_date":       release_date,
-                "price_krw":          p.get("final", 0) // 100 if p else None,
-                "discount_pct":       p.get("discount_percent", 0) if p else 0,
-                "original_price_krw": p.get("initial", 0) // 100 if p else None,
+                "price_krw":          price_krw,
+                "discount_pct":       discount_pct,
+                "original_price_krw": original_price_krw,
             }
     except Exception:
         pass
